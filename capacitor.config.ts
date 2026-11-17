@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'com.makset.caresync',
-  appName: 'MaKSET CareSync',
+  appName: 'MaKSET',
   webDir: 'dist',
   server: {
     androidScheme: 'https',

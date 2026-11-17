@@ -124,7 +124,7 @@ export const LayoutShell: React.FC<{ children: React.ReactNode }> = ({ children 
                 +
               </div>
               <div className="min-w-0">
-                <div className="truncate font-bold tracking-tight">MaKSET CareSync</div>
+                <div className="truncate font-bold tracking-tight">MaKSET</div>
                 <div className="truncate text-xs text-white/80">{state.fac}</div>
               </div>
             </div>

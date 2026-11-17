@@ -1,6 +1,6 @@
 {
 	"appId": "com.makset.caresync",
-	"appName": "MaKSET CareSync",
+	"appName": "MaKSET",
 	"webDir": "dist",
 	"server": {
 		"androidScheme": "https"

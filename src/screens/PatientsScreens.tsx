@@ -877,7 +877,7 @@ export const ShareHistoryScreen: React.FC = () => {
   const mine = state.E.filter((e) => e.pi === state.cur);
 
   const summaryText = [
-    `MaKSET CareSync Patient History Summary`,
+    `MaKSET Patient History Summary`,
     `Patient: ${currentPatient.n} (${currentPatient.id})`,
     `To: ${recipient} | Reason: ${reason} | Consent: ${consent}`,
     currentPatient.al ? `Allergy: ${currentPatient.al}` : '',
