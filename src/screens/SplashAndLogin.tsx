@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
-import { Accessibility, Building2, Eye, EyeOff, Globe } from 'lucide-react';
+import React, { useEffect } from 'react';
+import { Accessibility, Building2, Globe, LogIn } from 'lucide-react';
 import { useCareSync } from '../store/useCareSyncStore';
-import { FieldLabel, InputField, PrimaryButton, SingleChoiceChips } from '../components/UiPrimitives';
+import { PrimaryButton, SingleChoiceChips } from '../components/UiPrimitives';
 import { CareSyncState } from '../types/caresync';
 
 export const SplashScreen: React.FC = () => {
@@ -43,16 +43,19 @@ export const SplashScreen: React.FC = () => {
 };
 
 export const LoginScreen: React.FC = () => {
-  const { state, signIn, showModal, closeModal, setLanguage, toggleHighContrast, toast } =
-    useCareSync();
-  const [identifier, setIdentifier] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    signIn(identifier, password);
-  };
+  const {
+    state,
+    authLoading,
+    authError,
+    signedInEmail,
+    signInWithGoogle,
+    continueSession,
+    showModal,
+    closeModal,
+    setLanguage,
+    toggleHighContrast,
+    toast,
+  } = useCareSync();
 
   const openDeviceSetupModal = () => {
     showModal({
@@ -111,7 +114,7 @@ export const LoginScreen: React.FC = () => {
         </div>
 
         <div
-          className="mb-4 flex items-center gap-3 rounded-xl border p-3.5"
+          className="mb-5 flex items-center gap-3 rounded-xl border p-3.5"
           style={{ backgroundColor: 'var(--gl)', borderColor: 'var(--ln)' }}
         >
           <Building2 className="h-7 w-7 flex-none" style={{ color: 'var(--g)' }} />
@@ -123,52 +126,44 @@ export const LoginScreen: React.FC = () => {
           </div>
         </div>
 
-        <form onSubmit={handleSubmit}>
-          <FieldLabel className="!font-semibold">
-            <span style={{ color: 'var(--tx)' }}>Staff ID or email</span>
-          </FieldLabel>
-          <InputField
-            value={identifier}
-            onChange={(e) => setIdentifier(e.target.value)}
-            placeholder="Staff ID, name, or email"
-            autoComplete="username"
-          />
-
-          <FieldLabel className="!font-semibold">
-            <span style={{ color: 'var(--tx)' }}>Password</span>
-          </FieldLabel>
-          <div className="relative">
-            <InputField
-              type={showPassword ? 'text' : 'password'}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Enter your password"
-              autoComplete="current-password"
-              className="pr-11"
-            />
-            <button
-              type="button"
-              onClick={() => setShowPassword((prev) => !prev)}
-              aria-label={showPassword ? 'Hide password' : 'Show password'}
-              className="absolute right-1 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-lg"
-              style={{ color: 'var(--mu)' }}
-            >
-              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            </button>
+        {authError && (
+          <div
+            className="mb-3 rounded-xl border px-3.5 py-2.5 text-xs font-medium"
+            style={{ backgroundColor: 'var(--rdl)', borderColor: 'var(--rd)', color: 'var(--rd)' }}
+          >
+            {authError}
           </div>
+        )}
 
-          <PrimaryButton type="submit" className="mt-5">
-            Log In
+        {signedInEmail ? (
+          <div className="space-y-2.5">
+            <PrimaryButton disabled={authLoading} onClick={() => void continueSession()}>
+              <LogIn className="h-4 w-4" />
+              {authLoading ? 'Opening MaKSET…' : `Continue as ${signedInEmail}`}
+            </PrimaryButton>
+            <PrimaryButton
+              variant="outline"
+              disabled={authLoading}
+              onClick={() => void signInWithGoogle()}
+            >
+              Switch Google account
+            </PrimaryButton>
+          </div>
+        ) : (
+          <PrimaryButton disabled={authLoading} onClick={() => void signInWithGoogle()}>
+            <LogIn className="h-4 w-4" />
+            {authLoading ? 'Signing in…' : 'Sign in with Google'}
           </PrimaryButton>
-          <p className="mt-1.5 text-center text-[11px]" style={{ color: 'var(--mu)' }}>
-            Server authentication pending — enter your staff credentials to open.
-          </p>
-        </form>
+        )}
+
+        <p className="mt-2.5 text-center text-xs" style={{ color: 'var(--mu)' }}>
+          Sign in with your Google staff email to access facility records and referrals.
+        </p>
 
         <button
           type="button"
           onClick={openDeviceSetupModal}
-          className="mt-3 block w-full py-2 text-center text-sm font-semibold"
+          className="mt-4 block w-full py-2 text-center text-sm font-semibold"
           style={{ color: 'var(--g)' }}
         >
           Facility device status

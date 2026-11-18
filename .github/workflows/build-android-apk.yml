@@ -31,6 +31,8 @@ jobs:
         run: npm install --legacy-peer-deps
 
       - name: Build web assets and sync Capacitor Android
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || 'https://ais-pre-p2i2jomcid6mmczfirt2de-266915964484.europe-west2.run.app' }}
         run: npm run cap:android
 
       - name: Accept Android SDK licenses

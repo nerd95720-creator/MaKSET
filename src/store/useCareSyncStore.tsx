@@ -1,10 +1,12 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { onAuthStateChanged, signInWithPopup, signOut as firebaseSignOut } from 'firebase/auth';
 import {
   buildSummaryLines,
   createInitialState,
   ENCOUNTER_FLAGS,
   HOME_FACILITY,
 } from '../data/seedData';
+import { apiRequest, BootstrapResponse, getMemoryIdToken, setMemoryIdToken } from '../lib/api';
 import {
   clearPersistedJson,
   initCapacitorShell,
@@ -15,6 +17,7 @@ import {
   subscribeNetworkChanges,
   triggerHaptic,
 } from '../lib/capacitor';
+import { auth, googleAuthProvider } from '../lib/firebase';
 import {
   CareSyncState,
   DashboardLevelKey,
@@ -48,17 +51,6 @@ const ACCESS_BY_ROLE: Partial<Record<Role, ScreenId[]>> = {
   asst: ['home', 'stf'],
   admin: ['home', 'adm'],
 };
-
-function detectKeywordPosition(password: string): Position | '' {
-  const s = (password || '').toLowerCase();
-  if (/creator/.test(s)) return 'creator';
-  if (/assist/.test(s)) return 'asst';
-  if (s.indexOf('oc') === 0 || /in.?charge/.test(s)) return 'oc';
-  if (/lab/.test(s)) return 'lab';
-  if (/pharm/.test(s)) return 'pharm';
-  if (/nurse|chew|staff/.test(s)) return 'nurse';
-  return '';
-}
 
 function nowTimeLabel(): string {
   return `Today, ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
@@ -105,7 +97,11 @@ interface CareSyncContextValue {
   setEncounterType: (type: string) => void;
   setDashboardLevel: (level: DashboardLevelKey) => void;
   setAdminFacility: (fac: string) => void;
-  signIn: (identifier: string, password: string) => boolean;
+  authLoading: boolean;
+  authError: string | null;
+  signedInEmail: string | null;
+  signInWithGoogle: () => Promise<boolean>;
+  continueSession: () => Promise<boolean>;
   logout: () => void;
   syncNow: () => void;
   registerPatient: (input: {
@@ -190,6 +186,9 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [modal, setModal] = useState<ModalConfig | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [signedInEmail, setSignedInEmail] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -269,6 +268,96 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [state.theme, state.highContrast]);
 
+  const applyBootstrap = useCallback((data: BootstrapResponse, navigateHome: boolean) => {
+    setState((prev) => {
+      const pos: Position = data.user.pos;
+      const nextRole: Role =
+        pos === 'creator'
+          ? 'admin'
+          : pos === 'lab'
+            ? 'lab'
+            : pos === 'pharm'
+              ? 'pharm'
+              : pos === 'asst' && !data.user.agr
+                ? 'asst'
+                : 'nurse';
+      const activeFacility = data.user.registeredFacilities.includes(prev.fac)
+        ? prev.fac
+        : data.user.fac;
+      return {
+        ...prev,
+        off: false,
+        pending: 0,
+        lastSyncedLabel: nowTimeLabel(),
+        pos,
+        role: nextRole,
+        agr: data.user.agr,
+        nm: data.user.name,
+        sid: data.user.staffCode,
+        fac: activeFacility,
+        registeredFacilities: data.user.registeredFacilities,
+        facilities: data.facilities.length ? data.facilities : prev.facilities,
+        stf: data.stf.length ? data.stf : prev.stf,
+        pts: data.pts.length ? data.pts : prev.pts,
+        E: data.E,
+        lab: data.lab,
+        ph: data.ph,
+        ref: data.ref,
+        nt: data.nt,
+        aud: data.aud,
+        ...(navigateHome ? { ver: {}, brk: {}, stack: ['home' as ScreenId] } : {}),
+      };
+    });
+  }, []);
+
+  const syncBatchToBackend = useCallback(async () => {
+    if (!getMemoryIdToken() || stateRef.current.off) return false;
+    const s = stateRef.current;
+    const unsyncedEncounters = s.E.filter((e) => !e.sync).map((encounter) => ({
+      encounter,
+      patientCode: s.pts[encounter.pi]?.id || 'MAK-002431',
+    }));
+    const queuedReferrals = s.ref
+      .filter((r) => r.st === 'Queued')
+      .map((referral) => ({
+        referral,
+        patientCode: s.pts[referral.pi]?.id || 'MAK-002431',
+      }));
+    await apiRequest('/api/sync', {
+      method: 'POST',
+      body: {
+        patientsList: s.pts,
+        encountersList: unsyncedEncounters,
+        referralsList: queuedReferrals,
+        facilitiesList: s.facilities,
+        staffList: s.pos === 'oc' ? s.stf : [],
+        facility: s.fac,
+      },
+    });
+    const fresh = await apiRequest<BootstrapResponse>('/api/bootstrap');
+    applyBootstrap(fresh, false);
+    return true;
+  }, [applyBootstrap]);
+
+  // Keep in-memory Firebase ID token synchronized with auth session
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        setMemoryIdToken(null);
+        setSignedInEmail(null);
+        return;
+      }
+      setSignedInEmail(user.email || null);
+      try {
+        const token = await user.getIdToken();
+        setMemoryIdToken(token);
+      } catch {
+        setMemoryIdToken(null);
+      }
+    });
+    return () => unsub();
+  }, []);
+
   // Automatically track real network connection & sync offline queue on reconnect
   useEffect(() => {
     return subscribeNetworkChanges((connected) => {
@@ -282,35 +371,21 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           stateRef.current.off ||
           stateRef.current.pending > 0 ||
           stateRef.current.ref.some((r) => r.st === 'Queued');
-        if (!stateRef.current.off && stateRef.current.pending === 0 && !stateRef.current.ref.some((r) => r.st === 'Queued')) {
-          return;
-        }
-        setState((prev) => {
-          const hasQueuedRefs = prev.ref.some((r) => r.st === 'Queued');
-          const shouldSync = prev.pending > 0 || hasQueuedRefs;
-          if (!shouldSync) {
-            return { ...prev, off: false };
-          }
-          return {
-            ...prev,
-            off: false,
-            synced: prev.synced + prev.pending,
-            pending: 0,
-            lastSyncedLabel: nowTimeLabel(),
-            E: prev.E.map((e) => ({ ...e, sync: true })),
-            ref: prev.ref.map((r) =>
-              r.st === 'Queued'
-                ? { ...r, st: 'Delivered', w: `Delivered to ${r.to}` }
-                : r,
-            ),
-          };
-        });
-        if (hadOfflineOrPending && (stateRef.current.pending > 0 || stateRef.current.ref.some((r) => r.st === 'Queued'))) {
-          toast('Connection restored. Queued records synced automatically.');
+        if (!hadOfflineOrPending) return;
+
+        setState((prev) => ({ ...prev, off: false }));
+        if (getMemoryIdToken()) {
+          syncBatchToBackend()
+            .then(() => {
+              toast('Connection restored. Queued records synced to server.');
+            })
+            .catch(() => {
+              // Keep queued changes locally if backend is unreachable
+            });
         }
       }
     });
-  }, [toast]);
+  }, [syncBatchToBackend, toast]);
 
   const currentScreen = state.stack[state.stack.length - 1] || 'splash';
   const currentPatient = state.pts[state.cur] || state.pts[0];
@@ -448,101 +523,61 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     });
   }, [drawerOpen, modal, back]);
 
-  const signIn = useCallback(
-    (identifier: string, password: string): boolean => {
-      const u = identifier.trim();
-      const p = password.trim();
-      if (!u || !p) {
-        toast('Enter your staff ID or email and password');
-        return false;
-      }
-      const q = u.toLowerCase();
-      const isCreatorId = q === 'creator' || q === 'creator@makset' || q === 'app creator' || q === 'dev-0001';
-      let pos: Position | '' = isCreatorId ? 'creator' : detectKeywordPosition(p);
-      const activeMatches =
-        pos === 'creator'
-          ? []
-          : stateRef.current.stf.filter(
-              (s) => s.n.toLowerCase() === q || s.e.toLowerCase() === q || s.id.toLowerCase() === q,
-            );
-      const match = activeMatches.find((s) => s.st === 'Active') || activeMatches[0] || null;
-
-      if (match) {
-        if (match.st !== 'Active') {
-          toast(
-            match.role === 'oc' && match.st === 'Blocked'
-              ? 'Access blocked by the administrator.'
-              : match.st === 'Terminated'
-                ? 'Your access has been terminated. Contact your officer in charge.'
-                : 'Your access is suspended. Contact your officer in charge.',
-          );
-          return false;
-        }
-        pos = match.role;
-      } else if (!pos) {
-        // Pending backend/server authentication: allow facility session entry as OC so all clinical & staff registration flows open
-        pos = 'oc';
-      }
-
-      const fallbackNames: Record<Position, string> = {
-        creator: 'App Creator',
-        oc: u.includes('@') ? u.split('@')[0] : u,
-        asst: 'OC Assistant',
-        lab: 'Lab Technician Musa',
-        pharm: 'Pharmacist Hauwa',
-        nurse: 'Nurse Amina',
-      };
-      const fallbackIds: Record<Position, string> = {
-        creator: 'DEV-0001',
-        oc: u.includes('@') ? 'OC-AUTH' : u.toUpperCase(),
-        asst: 'AST-NEW',
-        lab: 'LAB-0031',
-        pharm: 'PHM-0017',
-        nurse: 'NRS-0142',
-      };
-
-      const registeredForUser = match
-        ? Array.from(
-            new Set([
-              match.fac,
-              ...(match.facilities || []),
-              ...activeMatches.filter((s) => s.st === 'Active').map((s) => s.fac),
-            ]),
-          )
-        : [stateRef.current.fac || HOME_FACILITY];
-
-      setState((prev) => {
-        const nextRole: Role =
-          pos === 'creator'
-            ? 'admin'
-            : pos === 'lab'
-              ? 'lab'
-              : pos === 'pharm'
-                ? 'pharm'
-                : pos === 'asst' && !prev.agr
-                  ? 'asst'
-                  : 'nurse';
-        return {
-          ...prev,
-          pos,
-          role: nextRole,
-          nm: match ? match.n : fallbackNames[pos],
-          sid: match ? match.id : fallbackIds[pos],
-          fac: match ? match.fac : prev.fac || HOME_FACILITY,
-          registeredFacilities: registeredForUser,
-          ver: {},
-          brk: {},
-          stack: ['home'],
-        };
-      });
+  const signInWithGoogle = useCallback(async (): Promise<boolean> => {
+    setAuthError(null);
+    setAuthLoading(true);
+    try {
+      const result = await signInWithPopup(auth, googleAuthProvider);
+      const token = await result.user.getIdToken();
+      setMemoryIdToken(token);
+      setSignedInEmail(result.user.email || null);
+      const data = await apiRequest<BootstrapResponse>('/api/bootstrap');
+      applyBootstrap(data, true);
       triggerHaptic(false).catch(() => {});
       return true;
-    },
-    [toast],
-  );
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Unable to sign in with Google.';
+      setAuthError(msg);
+      toast(msg);
+      return false;
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [applyBootstrap, toast]);
+
+  const continueSession = useCallback(async (): Promise<boolean> => {
+    if (!auth.currentUser) {
+      return signInWithGoogle();
+    }
+    setAuthError(null);
+    setAuthLoading(true);
+    try {
+      const token = await auth.currentUser.getIdToken(true);
+      setMemoryIdToken(token);
+      const data = await apiRequest<BootstrapResponse>('/api/bootstrap');
+      applyBootstrap(data, true);
+      triggerHaptic(false).catch(() => {});
+      return true;
+    } catch (error: unknown) {
+      if (stateRef.current.off) {
+        setState((prev) => ({ ...prev, stack: ['home'] }));
+        toast('Opened offline session using saved device records.');
+        return true;
+      }
+      const msg = error instanceof Error ? error.message : 'Unable to restore session.';
+      setAuthError(msg);
+      toast(msg);
+      return false;
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [applyBootstrap, signInWithGoogle, toast]);
 
   const logout = useCallback(() => {
     setDrawerOpen(false);
+    setMemoryIdToken(null);
+    setSignedInEmail(null);
+    firebaseSignOut(auth).catch(() => {});
     setState((prev) => ({
       ...prev,
       ver: {},
@@ -552,32 +587,24 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }));
   }, []);
 
-  const runSyncCompletion = useCallback(() => {
-    setState((prev) => {
-      if (prev.off) return prev;
-      return {
-        ...prev,
-        synced: prev.synced + prev.pending,
-        pending: 0,
-        lastSyncedLabel: nowTimeLabel(),
-        E: prev.E.map((e) => ({ ...e, sync: true })),
-        ref: prev.ref.map((r) =>
-          r.st === 'Queued'
-            ? { ...r, st: 'Delivered', w: `Delivered to ${r.to}` }
-            : r,
-        ),
-      };
-    });
-    toast('All records synced');
-  }, [toast]);
-
   const syncNow = useCallback(() => {
     if (stateRef.current.off) {
       toast('No internet connection. Records stay saved locally until online.');
       return;
     }
-    runSyncCompletion();
-  }, [runSyncCompletion, toast]);
+    if (!getMemoryIdToken()) {
+      toast('Sign in with Google to sync records to the server.');
+      return;
+    }
+    syncBatchToBackend()
+      .then(() => {
+        toast('All records synced');
+      })
+      .catch((error: unknown) => {
+        const msg = error instanceof Error ? error.message : 'Sync failed. Please try again.';
+        toast(msg);
+      });
+  }, [syncBatchToBackend, toast]);
 
   const registerPatient: CareSyncContextValue['registerPatient'] = useCallback(
     (input) => {
@@ -617,20 +644,36 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         dob: input.dob,
       };
 
+      const auditEntry = `${stateRef.current.nm} registered ${fullName}${input.noNin ? ' (temporary ID)' : ''}`;
+      const isOnline = !stateRef.current.off && Boolean(getMemoryIdToken());
+
       setState((prev) => ({
         ...prev,
         pts: [...prev.pts, newPatient],
         cur: newIndex,
         ver: { ...prev.ver, [newIndex]: true },
-        pending: prev.pending + 1,
+        pending: isOnline ? prev.pending : prev.pending + 1,
         tab: 'Summary',
-        aud: [
-          `${prev.nm} registered ${fullName}${input.noNin ? ' (temporary ID)' : ''}`,
-          ...prev.aud,
-        ],
+        aud: [auditEntry, ...prev.aud],
         stack: ['profile'],
       }));
-      toast('Patient saved on this device. Pending sync.');
+
+      if (isOnline) {
+        apiRequest('/api/patients', {
+          method: 'POST',
+          body: { patient: newPatient, auditEntry },
+        })
+          .then(() => {
+            setState((prev) => ({ ...prev, synced: prev.synced + 1, lastSyncedLabel: nowTimeLabel() }));
+            toast('Patient saved to server.');
+          })
+          .catch(() => {
+            setState((prev) => ({ ...prev, pending: prev.pending + 1 }));
+            toast('Patient saved locally. Pending sync.');
+          });
+      } else {
+        toast('Patient saved on this device. Pending sync.');
+      }
       triggerHaptic(false).catch(() => {});
       return true;
     },
@@ -695,6 +738,12 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         draftEncounter: updatedDraft,
         lab: [newTask, ...prev.lab],
       }));
+      if (!s.off && getMemoryIdToken()) {
+        apiRequest('/api/tasks', {
+          method: 'POST',
+          body: { kind: 'lab', task: newTask, facility: s.fac },
+        }).catch(() => {});
+      }
       toast('Lab order sent. The lab is alerted.');
       return true;
     },
@@ -711,13 +760,14 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         toast('No lab result is pending. Use Complete.');
         return false;
       }
+      const isOnline = !s.off && Boolean(getMemoryIdToken());
       const saved: Encounter = {
         ...draft,
         cc,
         x: { ...(draft.x || {}), ...customFields },
         status: 'open',
         stage: 1,
-        sync: false,
+        sync: isOnline,
       };
       setState((prev) => {
         const exists = prev.E.some((e) => e.uid === saved.uid);
@@ -725,10 +775,23 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ...prev,
           E: exists ? prev.E.map((e) => (e.uid === saved.uid ? saved : e)) : [...prev.E, saved],
           draftEncounter: null,
-          pending: prev.pending + 1,
+          pending: isOnline ? prev.pending : prev.pending + 1,
           stack: ['home'],
         };
       });
+      if (isOnline) {
+        const patientCode = s.pts[saved.pi]?.id || 'MAK-002431';
+        apiRequest('/api/encounters', {
+          method: 'POST',
+          body: { encounter: saved, patientCode, facility: s.fac },
+        }).catch(() => {
+          setState((prev) => ({
+            ...prev,
+            E: prev.E.map((e) => (e.uid === saved.uid ? { ...e, sync: false } : e)),
+            pending: prev.pending + 1,
+          }));
+        });
+      }
       toast('Saved. You will be notified when the result is ready.');
       return true;
     },
@@ -804,6 +867,12 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         draftEncounter: updatedDraft,
         ph: [newTask, ...prev.ph],
       }));
+      if (!s.off && getMemoryIdToken()) {
+        apiRequest('/api/tasks', {
+          method: 'POST',
+          body: { kind: 'ph', task: newTask, facility: s.fac },
+        }).catch(() => {});
+      }
       toast('Sent to pharmacy. Pharmacy is alerted.');
       return { ok: true };
     },
@@ -834,6 +903,7 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
 
       const flags = ENCOUNTER_FLAGS[draft.t] ?? 'LDR';
+      const isOnline = !s.off && Boolean(getMemoryIdToken());
       const finalized: Encounter = {
         ...draft,
         cc: input.cc,
@@ -843,10 +913,10 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         x: { ...(draft.x || {}), ...input.customFields },
         bypass: effectiveBypass,
         status: '',
-        sync: false,
+        sync: isOnline,
       };
 
-      let message = 'Saved on this device. Pending sync.';
+      let message = isOnline ? 'Encounter saved to server.' : 'Saved on this device. Pending sync.';
       let newborn: Patient | null = null;
       if (finalized.t === 'Labour/Delivery' && finalized.x?.['Newborn outcome'] === 'Live birth') {
         const mother = s.pts[s.cur];
@@ -869,10 +939,31 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           pts: newborn ? [...prev.pts, newborn] : prev.pts,
           draftEncounter: null,
           tab: 'History',
-          pending: prev.pending + 1,
+          pending: isOnline ? prev.pending : prev.pending + 1,
+          synced: isOnline ? prev.synced + 1 : prev.synced,
           stack: ['profile'],
         };
       });
+
+      if (isOnline) {
+        const patientCode = s.pts[finalized.pi]?.id || 'MAK-002431';
+        (async () => {
+          if (newborn) {
+            await apiRequest('/api/patients', { method: 'POST', body: { patient: newborn } });
+          }
+          await apiRequest('/api/encounters', {
+            method: 'POST',
+            body: { encounter: finalized, patientCode, facility: s.fac },
+          });
+        })().catch(() => {
+          setState((prev) => ({
+            ...prev,
+            E: prev.E.map((e) => (e.uid === finalized.uid ? { ...e, sync: false } : e)),
+            pending: prev.pending + 1,
+          }));
+        });
+      }
+
       toast(message);
       triggerHaptic(false).catch(() => {});
       return { ok: true };
@@ -896,6 +987,12 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const task = list[s.taskIndex];
       if (!task) return false;
       const isLab = s.taskKind === 'lab';
+      const isOnline = !s.off && Boolean(getMemoryIdToken());
+      const targetEnc = task.encounterUid ? s.E.find((e) => e.uid === task.encounterUid) : undefined;
+      const notifId = `nt-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+      const notifTxt = isLab ? `Result: ${outcomes.join('; ')}` : `Pharmacy: ${outcomes.join('; ')}`;
+      const patientCode = targetEnc ? s.pts[targetEnc.pi]?.id || 'MAK-002431' : 'MAK-002431';
+      const pName = targetEnc ? s.pts[targetEnc.pi]?.n || task.p : task.p;
 
       setState((prev) => {
         const nextLab = isLab ? prev.lab.filter((_, idx) => idx !== prev.taskIndex) : prev.lab;
@@ -903,32 +1000,28 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         let nextE = prev.E;
         let nextNt = prev.nt;
 
-        if (task.encounterUid) {
-          const targetEnc = prev.E.find((e) => e.uid === task.encounterUid);
-          if (targetEnc) {
-            nextE = prev.E.map((e) => {
-              if (e.uid !== task.encounterUid) return e;
-              return {
-                ...e,
-                res: isLab ? [...e.res, ...outcomes] : e.res,
-                rxs: !isLab ? (e.rxs ? `${e.rxs}; ` : '') + outcomes.join('; ') : e.rxs,
-                sync: false,
-              };
-            });
-            const pName = prev.pts[targetEnc.pi]?.n || task.p;
-            nextNt = [
-              {
-                id: `nt-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
-                encounterUid: targetEnc.uid,
-                pi: targetEnc.pi,
-                k: isLab ? 'lab' : 'ph',
-                p: pName,
-                txt: isLab ? `Result: ${outcomes.join('; ')}` : `Pharmacy: ${outcomes.join('; ')}`,
-                read: false,
-              },
-              ...prev.nt,
-            ];
-          }
+        if (task.encounterUid && targetEnc) {
+          nextE = prev.E.map((e) => {
+            if (e.uid !== task.encounterUid) return e;
+            return {
+              ...e,
+              res: isLab ? [...e.res, ...outcomes] : e.res,
+              rxs: !isLab ? (e.rxs ? `${e.rxs}; ` : '') + outcomes.join('; ') : e.rxs,
+              sync: isOnline,
+            };
+          });
+          nextNt = [
+            {
+              id: notifId,
+              encounterUid: targetEnc.uid,
+              pi: targetEnc.pi,
+              k: isLab ? 'lab' : 'ph',
+              p: pName,
+              txt: notifTxt,
+              read: false,
+            },
+            ...prev.nt,
+          ];
         }
 
         return {
@@ -937,10 +1030,25 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ph: nextPh,
           E: nextE,
           nt: nextNt,
-          pending: prev.pending + 1,
+          pending: isOnline ? prev.pending : prev.pending + 1,
           stack: prev.stack.length > 1 ? prev.stack.slice(0, -1) : prev.stack,
         };
       });
+
+      if (isOnline) {
+        apiRequest('/api/tasks/complete', {
+          method: 'POST',
+          body: {
+            kind: isLab ? 'lab' : 'ph',
+            taskUid: task.id,
+            encounterUid: task.encounterUid,
+            outcomes,
+            notif: targetEnc
+              ? { id: notifId, patientCode, patientName: pName, txt: notifTxt, facility: s.fac }
+              : undefined,
+          },
+        }).catch(() => {});
+      }
 
       toast(isLab ? 'Results sent. The nurse is notified.' : 'Dispensing recorded. The nurse is notified.');
       triggerHaptic(false).catch(() => {});
@@ -1005,9 +1113,10 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
       const s = stateRef.current;
       const p = s.pts[s.cur];
-      const st: Referral['st'] = s.off ? 'Queued' : 'Delivered';
+      const isOnline = !s.off && Boolean(getMemoryIdToken());
+      const st: Referral['st'] = isOnline ? 'Delivered' : 'Queued';
       const newRef: Referral = {
-        id: `REF-${1001 + s.ref.length}`,
+        id: `REF-${1001 + s.ref.length}-${Date.now().toString().slice(-3)}`,
         pi: s.cur,
         p: p.n,
         from: s.fac,
@@ -1025,13 +1134,25 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         ...prev,
         ref: [newRef, ...prev.ref],
         lastReferralId: newRef.id,
-        pending: prev.pending + 1,
+        pending: isOnline ? prev.pending : prev.pending + 1,
         stack: [...prev.stack, 'note'],
       }));
+      if (isOnline) {
+        apiRequest('/api/referrals', {
+          method: 'POST',
+          body: { referral: newRef, patientCode: p.id },
+        }).catch(() => {
+          setState((prev) => ({
+            ...prev,
+            ref: prev.ref.map((r) => (r.id === newRef.id ? { ...r, st: 'Queued', w: `Queued to ${to}` } : r)),
+            pending: prev.pending + 1,
+          }));
+        });
+      }
       toast(
-        s.off
-          ? 'Saved. The referral sends automatically when the phone is online.'
-          : `Referral delivered to ${to}`,
+        isOnline
+          ? `Referral delivered to ${to}`
+          : 'Saved. The referral sends automatically when the phone is online.',
       );
       return true;
     },
@@ -1040,25 +1161,38 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const acceptReferral = useCallback(
     (referralId: string) => {
-      const target = stateRef.current.ref.find((r) => r.id === referralId);
+      const s = stateRef.current;
+      const target = s.ref.find((r) => r.id === referralId);
       if (!target) return;
+      const notifId = `nt-${Date.now()}`;
+      const message = `Referral accepted by ${target.to}`;
+      const updated: Referral = { ...target, st: 'Accepted', w: `Accepted to ${target.to}` };
+
       setState((prev) => ({
         ...prev,
-        ref: prev.ref.map((r) =>
-          r.id === referralId ? { ...r, st: 'Accepted', w: `Accepted to ${r.to}` } : r,
-        ),
+        ref: prev.ref.map((r) => (r.id === referralId ? updated : r)),
         nt: [
           {
-            id: `nt-${Date.now()}`,
+            id: notifId,
             pi: target.pi,
             k: 'ref',
             p: target.p,
-            txt: `Referral accepted by ${target.to}`,
+            txt: message,
             read: false,
           },
           ...prev.nt,
         ],
       }));
+      if (!s.off && getMemoryIdToken()) {
+        apiRequest('/api/referrals', {
+          method: 'POST',
+          body: {
+            referral: updated,
+            patientCode: s.pts[target.pi]?.id || 'MAK-002431',
+            notif: { id: notifId, message, facility: target.from },
+          },
+        }).catch(() => {});
+      }
       toast(`Accepted. ${target.from} is notified.`);
     },
     [toast],
@@ -1076,27 +1210,40 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const submitReferralOutcome = useCallback(
     (referralId: string, outcome: string, note: string) => {
-      const target = stateRef.current.ref.find((r) => r.id === referralId);
+      const s = stateRef.current;
+      const target = s.ref.find((r) => r.id === referralId);
       if (!target) return;
       const fb = outcome + (note.trim() ? `: ${note.trim()}` : '');
+      const notifId = `nt-${Date.now()}`;
+      const message = `Referral feedback from ${target.to}: ${fb}`;
+      const updated: Referral = { ...target, st: 'Completed', fb, w: `Feedback: ${fb}` };
+
       setState((prev) => ({
         ...prev,
-        ref: prev.ref.map((r) =>
-          r.id === referralId ? { ...r, st: 'Completed', fb, w: `Feedback: ${fb}` } : r,
-        ),
+        ref: prev.ref.map((r) => (r.id === referralId ? updated : r)),
         nt: [
           {
-            id: `nt-${Date.now()}`,
+            id: notifId,
             pi: target.pi,
             k: 'ref',
             p: target.p,
-            txt: `Referral feedback from ${target.to}: ${fb}`,
+            txt: message,
             read: false,
           },
           ...prev.nt,
         ],
         stack: prev.stack.length > 1 ? prev.stack.slice(0, -1) : prev.stack,
       }));
+      if (!s.off && getMemoryIdToken()) {
+        apiRequest('/api/referrals', {
+          method: 'POST',
+          body: {
+            referral: updated,
+            patientCode: s.pts[target.pi]?.id || 'MAK-002431',
+            notif: { id: notifId, message, facility: target.from },
+          },
+        }).catch(() => {});
+      }
       toast(`Feedback sent to ${target.from}`);
     },
     [toast],
@@ -1252,12 +1399,17 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         toast('This facility is already registered');
         return false;
       }
+      const newFacility: FacilityInfo = { name: trimmedName, type, lga: trimmedLga };
+      const isOnline = !stateRef.current.off && Boolean(getMemoryIdToken());
       setState((prev) => ({
         ...prev,
-        facilities: [...prev.facilities, { name: trimmedName, type, lga: trimmedLga }],
+        facilities: [...prev.facilities, newFacility],
         af: trimmedName,
-        pending: prev.pending + 1,
+        pending: isOnline ? prev.pending : prev.pending + 1,
       }));
+      if (isOnline) {
+        apiRequest('/api/facilities', { method: 'POST', body: { facility: newFacility } }).catch(() => {});
+      }
       toast(`${trimmedName} registered and ready for referrals`);
       return true;
     },
@@ -1266,6 +1418,7 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const toggleStaffFacility = useCallback(
     (staffId: string, facilityName: string) => {
+      let nextAssigned: string[] | null = null;
       setState((prev) => ({
         ...prev,
         stf: prev.stf.map((s) => {
@@ -1275,13 +1428,18 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           if (exists && facilityName === s.fac) {
             return s;
           }
-          const nextList = exists
+          nextAssigned = exists
             ? currentList.filter((f) => f !== facilityName)
             : [...currentList, facilityName];
-          return { ...s, facilities: nextList };
+          return { ...s, facilities: nextAssigned };
         }),
-        pending: prev.pending + 1,
       }));
+      if (nextAssigned && !stateRef.current.off && getMemoryIdToken()) {
+        apiRequest(`/api/staff/${encodeURIComponent(staffId)}`, {
+          method: 'PATCH',
+          body: { assignedFacilities: nextAssigned },
+        }).catch(() => {});
+      }
       toast('Staff facility assignment updated');
     },
     [toast],
@@ -1291,6 +1449,12 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setState((prev) => {
       const next = !prev.agr;
       toast(next ? 'Assistant has full access' : 'Assistant access limited');
+      if (!prev.off && getMemoryIdToken()) {
+        apiRequest('/api/staff/assistant-access', {
+          method: 'POST',
+          body: { fullAccess: next },
+        }).catch(() => {});
+      }
       return { ...prev, agr: next };
     });
   }, [toast]);
@@ -1301,8 +1465,13 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setState((prev) => ({
         ...prev,
         stf: prev.stf.map((s) => (s.id === staffId ? { ...s, st: status } : s)),
-        pending: prev.pending + 1,
       }));
+      if (!stateRef.current.off && getMemoryIdToken()) {
+        apiRequest(`/api/staff/${encodeURIComponent(staffId)}`, {
+          method: 'PATCH',
+          body: { status },
+        }).catch(() => {});
+      }
       if (target) toast(`${target.n}: ${status}`);
     },
     [toast],
@@ -1333,26 +1502,35 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             : 'nurse';
       const prefix = { nurse: 'NRS', lab: 'LAB', pharm: 'PHM', asst: 'AST', oc: 'OC' }[role];
       const staffId = `${prefix}-${1000 + stateRef.current.stf.length}`;
+      const newStaff: StaffMember = {
+        id: staffId,
+        n,
+        e,
+        role,
+        fac: stateRef.current.fac,
+        facilities: [stateRef.current.fac],
+        st: 'Active',
+      };
+      const isOnline = !stateRef.current.off && Boolean(getMemoryIdToken());
       setState((prev) => ({
         ...prev,
-        stf: [
-          ...prev.stf,
-          {
-            id: staffId,
-            n,
-            e,
-            role,
-            fac: prev.fac,
-            st: 'Active',
-          },
-        ],
-        pending: prev.pending + 1,
+        stf: [...prev.stf, newStaff],
+        pending: isOnline ? prev.pending : prev.pending + 1,
       }));
-      toast(
-        stateRef.current.off
-          ? `${n} (${staffId}) queued locally. Will sync to server when online.`
-          : `${n} (${staffId}) registered and queued for server sync.`,
-      );
+      if (isOnline) {
+        apiRequest('/api/staff', {
+          method: 'POST',
+          body: { staff: newStaff, requireOc: true },
+        })
+          .then(() => {
+            toast(`${n} (${staffId}) registered on server.`);
+          })
+          .catch((err: unknown) => {
+            toast(err instanceof Error ? err.message : 'Failed to save staff on server.');
+          });
+      } else {
+        toast(`${n} (${staffId}) queued locally. Will sync to server when online.`);
+      }
       return true;
     },
     [toast],
@@ -1360,10 +1538,20 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const resetAllData = useCallback(async () => {
     await clearPersistedJson();
+    if (!stateRef.current.off && getMemoryIdToken()) {
+      try {
+        const data = await apiRequest<BootstrapResponse>('/api/bootstrap');
+        applyBootstrap(data, true);
+        toast('Local cache cleared and reloaded from server');
+        return;
+      } catch {
+        // Fallback to local defaults
+      }
+    }
     const fresh = createInitialState();
     setState({ ...fresh, stack: ['home'] });
     toast('Demo data restored to initial Azare PHC records');
-  }, [toast]);
+  }, [applyBootstrap, toast]);
 
   const value: CareSyncContextValue = {
     state,
@@ -1384,7 +1572,11 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setEncounterType: (g) => setState((prev) => ({ ...prev, g })),
     setDashboardLevel: (lv) => setState((prev) => ({ ...prev, lv })),
     setAdminFacility: (af) => setState((prev) => ({ ...prev, af })),
-    signIn,
+    authLoading,
+    authError,
+    signedInEmail,
+    signInWithGoogle,
+    continueSession,
     logout,
     syncNow,
     registerPatient,

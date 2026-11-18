@@ -127,7 +127,16 @@ export const PrimaryButton: React.FC<{
   compact?: boolean;
   className?: string;
   type?: 'button' | 'submit';
-}> = ({ children, onClick, variant = 'solid', compact = false, className = '', type = 'button' }) => {
+  disabled?: boolean;
+}> = ({
+  children,
+  onClick,
+  variant = 'solid',
+  compact = false,
+  className = '',
+  type = 'button',
+  disabled = false,
+}) => {
   const heightCls = compact ? 'min-h-[42px] px-3 py-2 text-[13px]' : 'min-h-[48px] px-4 py-3 text-[15px]';
   const style: React.CSSProperties =
     variant === 'outline'
@@ -141,8 +150,9 @@ export const PrimaryButton: React.FC<{
   return (
     <button
       type={type}
+      disabled={disabled}
       onClick={onClick}
-      className={`my-1.5 flex w-full items-center justify-center gap-2 rounded-xl font-semibold transition-opacity active:opacity-85 ${heightCls} ${className}`}
+      className={`my-1.5 flex w-full items-center justify-center gap-2 rounded-xl font-semibold transition-opacity active:opacity-85 disabled:opacity-60 ${heightCls} ${className}`}
       style={style}
     >
       {children}
