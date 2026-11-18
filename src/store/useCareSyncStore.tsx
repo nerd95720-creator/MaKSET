@@ -119,6 +119,7 @@ interface CareSyncContextValue {
   signedInEmail: string | null;
   signInWithGoogle: () => Promise<boolean>;
   completeMobileAuthCode: (code: string) => Promise<boolean>;
+  loginLocalStaff: (emailOrId: string, preferredPos?: Position) => boolean;
   continueSession: () => Promise<boolean>;
   logout: () => void;
   syncNow: () => void;
@@ -580,13 +581,93 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     });
   }, [completeMobileAuthCode]);
 
+  const loginLocalStaff = useCallback(
+    (emailOrId: string, preferredPos?: Position): boolean => {
+      setAuthError(null);
+      const s = stateRef.current;
+      const q = emailOrId.trim().toLowerCase();
+
+      if (q === 'creator' || q === 'creator@makset.ng' || (!q && preferredPos === 'creator')) {
+        setState((prev) => ({
+          ...prev,
+          pos: 'creator',
+          role: 'admin',
+          nm: 'App Creator',
+          sid: 'CRE-0001',
+          registeredFacilities: prev.facilities.map((f) => f.name),
+          ver: {},
+          brk: {},
+          stack: ['home'],
+        }));
+        triggerHaptic(false).catch(() => {});
+        return true;
+      }
+
+      const match = q
+        ? s.stf.find((st) => st.e.toLowerCase() === q || st.id.toLowerCase() === q)
+        : preferredPos
+          ? s.stf.find(
+              (st) =>
+                st.role === preferredPos &&
+                (st.fac === s.fac || st.facilities?.includes(s.fac)),
+            ) || s.stf.find((st) => st.role === preferredPos)
+          : undefined;
+
+      if (!match) {
+        const msg =
+          'Staff email or ID not found on this device. Select a facility role chip below, ask your Officer in Charge to register you, or use Google Sign-In.';
+        setAuthError(msg);
+        toast(msg);
+        return false;
+      }
+
+      if (match.st !== 'Active') {
+        const msg =
+          match.role === 'oc' && match.st === 'Blocked'
+            ? 'Access blocked by the administrator.'
+            : match.st === 'Terminated'
+              ? 'Your access has been terminated. Contact your officer in charge.'
+              : 'Your access is suspended. Contact your officer in charge.';
+        setAuthError(msg);
+        toast(msg);
+        return false;
+      }
+
+      const mappedRole: Role =
+        match.role === 'lab'
+          ? 'lab'
+          : match.role === 'pharm'
+            ? 'pharm'
+            : match.role === 'asst' && !s.agr
+              ? 'asst'
+              : 'nurse';
+
+      const regFacilities = Array.from(new Set([match.fac, ...(match.facilities || [])]));
+      setState((prev) => ({
+        ...prev,
+        pos: match.role,
+        role: mappedRole,
+        nm: match.n,
+        sid: match.id,
+        fac: regFacilities.includes(prev.fac) ? prev.fac : match.fac,
+        registeredFacilities: regFacilities,
+        ver: {},
+        brk: {},
+        stack: ['home'],
+      }));
+      triggerHaptic(false).catch(() => {});
+      return true;
+    },
+    [toast],
+  );
+
   const signInWithGoogle = useCallback(async (): Promise<boolean> => {
     setAuthError(null);
     if (isNativeCapacitor()) {
       setAuthLoading(true);
       try {
         await openExternalAuthUrl(`${API_BASE}/?mobile_auth=1`);
-        toast('Complete Google sign-in in your browser to return to MaKSET.');
+        toast('Complete Google sign-in in Chrome to return to MaKSET.');
         return true;
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : 'Unable to open browser for Google sign-in.';
@@ -608,7 +689,10 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       triggerHaptic(false).catch(() => {});
       return true;
     } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : 'Unable to sign in with Google.';
+      const raw = error instanceof Error ? error.message : 'Unable to sign in with Google.';
+      const msg = /unauthorized-domain|requested action is invalid/i.test(raw)
+        ? 'Google Sign-In is only available on the published web app or updated APK. Use Staff Sign-In above for offline/facility access.'
+        : raw;
       setAuthError(msg);
       toast(msg);
       return false;
@@ -1649,6 +1733,7 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     signedInEmail,
     signInWithGoogle,
     completeMobileAuthCode,
+    loginLocalStaff,
     continueSession,
     logout,
     syncNow,

@@ -1,9 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import { Accessibility, Building2, Globe, KeyRound, LogIn } from 'lucide-react';
+import { Accessibility, Building2, Cloud, Globe, KeyRound, LogIn } from 'lucide-react';
 import { isNativeCapacitor } from '../lib/capacitor';
 import { useCareSync } from '../store/useCareSyncStore';
-import { PrimaryButton, SingleChoiceChips } from '../components/UiPrimitives';
-import { CareSyncState } from '../types/caresync';
+import {
+  FieldLabel,
+  InputField,
+  PrimaryButton,
+  SingleChoiceChips,
+} from '../components/UiPrimitives';
+import { CareSyncState, Position } from '../types/caresync';
 
 export const SplashScreen: React.FC = () => {
   const { go } = useCareSync();
@@ -43,6 +48,15 @@ export const SplashScreen: React.FC = () => {
   );
 };
 
+const QUICK_ROLE_OPTIONS: { label: string; pos: Position; defaultEmail: string }[] = [
+  { label: 'Nurse/CHEW', pos: 'nurse', defaultEmail: 'amina@azare.phc' },
+  { label: 'Officer in charge', pos: 'oc', defaultEmail: 'halima@azare.phc' },
+  { label: 'OC assistant', pos: 'asst', defaultEmail: 'ibrahim@azare.phc' },
+  { label: 'Lab technician', pos: 'lab', defaultEmail: 'musa@azare.phc' },
+  { label: 'Pharmacist', pos: 'pharm', defaultEmail: 'hauwa@azare.phc' },
+  { label: 'App creator', pos: 'creator', defaultEmail: 'creator@makset.ng' },
+];
+
 export const LoginScreen: React.FC = () => {
   const {
     state,
@@ -51,6 +65,7 @@ export const LoginScreen: React.FC = () => {
     signedInEmail,
     signInWithGoogle,
     completeMobileAuthCode,
+    loginLocalStaff,
     continueSession,
     showModal,
     closeModal,
@@ -58,9 +73,26 @@ export const LoginScreen: React.FC = () => {
     toggleHighContrast,
     toast,
   } = useCareSync();
+
+  const [selectedRoleLabel, setSelectedRoleLabel] = useState('Nurse/CHEW');
+  const [staffInput, setStaffInput] = useState('amina@azare.phc');
   const [showCodeEntry, setShowCodeEntry] = useState(false);
   const [manualCode, setManualCode] = useState('');
   const nativeApp = isNativeCapacitor();
+
+  const handleSelectRole = (label: string) => {
+    setSelectedRoleLabel(label);
+    const match = QUICK_ROLE_OPTIONS.find((r) => r.label === label);
+    if (match) {
+      setStaffInput(match.defaultEmail);
+    }
+  };
+
+  const handleStaffLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    const roleMatch = QUICK_ROLE_OPTIONS.find((r) => r.label === selectedRoleLabel);
+    loginLocalStaff(staffInput, roleMatch?.pos);
+  };
 
   const openDeviceSetupModal = () => {
     showModal({
@@ -68,7 +100,7 @@ export const LoginScreen: React.FC = () => {
       body: (
         <div className="space-y-3 text-sm">
           <p style={{ color: 'var(--mu)' }}>
-            This device is provisioned by your facility administrator for secure PHC and referral access.
+            This device is provisioned by your facility administrator for offline-first PHC records and cloud referral sync.
           </p>
           <div className="rounded-xl p-3" style={{ backgroundColor: 'var(--gl)' }}>
             <div className="font-semibold">Registered Facility</div>
@@ -108,18 +140,18 @@ export const LoginScreen: React.FC = () => {
           <img
             src="/assets/nphcda-logo.png"
             alt="NPHCDA Logo"
-            className="mx-auto mb-2 block w-36 rounded-2xl bg-white p-1.5 shadow-sm"
+            className="mx-auto mb-2 block w-32 rounded-2xl bg-white p-1.5 shadow-sm"
           />
           <h2 className="text-3xl font-bold" style={{ color: 'var(--g)' }}>
             MaKSET
           </h2>
-          <p className="mb-4 text-sm font-semibold" style={{ color: 'var(--g)' }}>
+          <p className="mb-3 text-sm font-semibold" style={{ color: 'var(--g)' }}>
             Primary Healthcare
           </p>
         </div>
 
         <div
-          className="mb-5 flex items-center gap-3 rounded-xl border p-3.5"
+          className="mb-4 flex items-center gap-3 rounded-xl border p-3.5"
           style={{ backgroundColor: 'var(--gl)', borderColor: 'var(--ln)' }}
         >
           <Building2 className="h-7 w-7 flex-none" style={{ color: 'var(--g)' }} />
@@ -140,14 +172,49 @@ export const LoginScreen: React.FC = () => {
           </div>
         )}
 
+        <form onSubmit={handleStaffLogin} className="space-y-2.5">
+          <div>
+            <FieldLabel className="!mt-0">Facility role</FieldLabel>
+            <SingleChoiceChips
+              options={QUICK_ROLE_OPTIONS.map((r) => r.label)}
+              value={selectedRoleLabel}
+              onChange={handleSelectRole}
+            />
+          </div>
+
+          <div>
+            <FieldLabel>Staff email or ID</FieldLabel>
+            <InputField
+              type="text"
+              value={staffInput}
+              onChange={(e) => setStaffInput(e.target.value)}
+              placeholder="e.g. amina@azare.phc or NRS-0142"
+            />
+          </div>
+
+          <PrimaryButton type="submit" disabled={authLoading}>
+            <LogIn className="h-4 w-4" />
+            Sign in to Facility
+          </PrimaryButton>
+        </form>
+
+        <div className="my-4 flex items-center gap-3">
+          <div className="h-px flex-1" style={{ backgroundColor: 'var(--ln)' }} />
+          <span className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--mu)' }}>
+            Cloud Sync Account
+          </span>
+          <div className="h-px flex-1" style={{ backgroundColor: 'var(--ln)' }} />
+        </div>
+
         {signedInEmail ? (
-          <div className="space-y-2.5">
-            <PrimaryButton disabled={authLoading} onClick={() => void continueSession()}>
-              <LogIn className="h-4 w-4" />
-              {authLoading ? 'Opening MaKSET…' : `Continue as ${signedInEmail}`}
+          <div className="space-y-2">
+            <PrimaryButton variant="outline" disabled={authLoading} onClick={() => void continueSession()}>
+              <Cloud className="h-4 w-4" />
+              {authLoading ? 'Opening MaKSET…' : `Sync & continue as ${signedInEmail}`}
             </PrimaryButton>
             <PrimaryButton
               variant="outline"
+              compact
               disabled={authLoading}
               onClick={() => void signInWithGoogle()}
             >
@@ -155,14 +222,14 @@ export const LoginScreen: React.FC = () => {
             </PrimaryButton>
           </div>
         ) : (
-          <PrimaryButton disabled={authLoading} onClick={() => void signInWithGoogle()}>
-            <LogIn className="h-4 w-4" />
-            {authLoading ? 'Signing in…' : 'Sign in with Google'}
+          <PrimaryButton variant="outline" disabled={authLoading} onClick={() => void signInWithGoogle()}>
+            <Cloud className="h-4 w-4" />
+            {authLoading ? 'Connecting…' : 'Sign in with Google (Cloud Sync)'}
           </PrimaryButton>
         )}
 
-        <p className="mt-2.5 text-center text-xs" style={{ color: 'var(--mu)' }}>
-          Sign in with your Google staff email to access facility records and referrals.
+        <p className="mt-2 text-center text-xs" style={{ color: 'var(--mu)' }}>
+          Use Staff Sign-In above for instant offline clinic access, or Google Sign-In to sync across facilities.
         </p>
 
         {nativeApp && (
@@ -205,7 +272,7 @@ export const LoginScreen: React.FC = () => {
         <button
           type="button"
           onClick={openDeviceSetupModal}
-          className="mt-4 block w-full py-2 text-center text-sm font-semibold"
+          className="mt-3 block w-full py-2 text-center text-sm font-semibold"
           style={{ color: 'var(--g)' }}
         >
           Facility device status
