@@ -1,5 +1,6 @@
-import React, { useEffect } from 'react';
-import { Accessibility, Building2, Globe, LogIn } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Accessibility, Building2, Globe, KeyRound, LogIn } from 'lucide-react';
+import { isNativeCapacitor } from '../lib/capacitor';
 import { useCareSync } from '../store/useCareSyncStore';
 import { PrimaryButton, SingleChoiceChips } from '../components/UiPrimitives';
 import { CareSyncState } from '../types/caresync';
@@ -49,6 +50,7 @@ export const LoginScreen: React.FC = () => {
     authError,
     signedInEmail,
     signInWithGoogle,
+    completeMobileAuthCode,
     continueSession,
     showModal,
     closeModal,
@@ -56,6 +58,9 @@ export const LoginScreen: React.FC = () => {
     toggleHighContrast,
     toast,
   } = useCareSync();
+  const [showCodeEntry, setShowCodeEntry] = useState(false);
+  const [manualCode, setManualCode] = useState('');
+  const nativeApp = isNativeCapacitor();
 
   const openDeviceSetupModal = () => {
     showModal({
@@ -159,6 +164,43 @@ export const LoginScreen: React.FC = () => {
         <p className="mt-2.5 text-center text-xs" style={{ color: 'var(--mu)' }}>
           Sign in with your Google staff email to access facility records and referrals.
         </p>
+
+        {nativeApp && (
+          <div className="mt-3">
+            {!showCodeEntry ? (
+              <button
+                type="button"
+                onClick={() => setShowCodeEntry(true)}
+                className="mx-auto flex items-center gap-1.5 py-1.5 text-xs font-semibold"
+                style={{ color: 'var(--g)' }}
+              >
+                <KeyRound className="h-3.5 w-3.5" />
+                Have a browser sign-in code? Enter it
+              </button>
+            ) : (
+              <div
+                className="space-y-2 rounded-xl border p-3"
+                style={{ backgroundColor: 'var(--sf)', borderColor: 'var(--ln)' }}
+              >
+                <div className="text-xs font-semibold">Enter 10-character sign-in code</div>
+                <input
+                  type="text"
+                  value={manualCode}
+                  onChange={(e) => setManualCode(e.target.value.toUpperCase())}
+                  placeholder="e.g. A7K9M2P4Q8"
+                  className="w-full rounded-lg border px-3 py-2 text-sm font-mono tracking-wider uppercase outline-none"
+                  style={{ borderColor: 'var(--ln)', backgroundColor: 'var(--bg)' }}
+                />
+                <PrimaryButton
+                  disabled={authLoading || !manualCode.trim()}
+                  onClick={() => void completeMobileAuthCode(manualCode)}
+                >
+                  Verify & Open MaKSET
+                </PrimaryButton>
+              </div>
+            )}
+          </div>
+        )}
 
         <button
           type="button"

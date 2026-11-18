@@ -3,6 +3,7 @@
   "appId": "1:503535833270:web:255a1b7f8de86905f4d617",
   "apiKey": "AIzaSyD6HQhRU5ucVe3ae6627rYBlEgSStyJ1zA",
   "authDomain": "argon-anvil-w6gf7.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-maksetcaresync-cefaad06-1004-437e-af3d-4fa046b5d299",
   "storageBucket": "argon-anvil-w6gf7.firebasestorage.app",
   "messagingSenderId": "503535833270",
   "measurementId": "",

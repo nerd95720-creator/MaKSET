@@ -1,5 +1,6 @@
 import { Capacitor } from '@capacitor/core';
 import { App as CapApp } from '@capacitor/app';
+import { Browser } from '@capacitor/browser';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import { SplashScreen } from '@capacitor/splash-screen';
 import { Preferences } from '@capacitor/preferences';
@@ -157,6 +158,51 @@ export function playAlertBeep(muted: boolean): void {
     }
   };
   playTone();
+}
+
+export async function openExternalAuthUrl(url: string): Promise<void> {
+  await Browser.open({ url, presentationStyle: 'popover' });
+}
+
+export async function closeExternalAuthBrowser(): Promise<void> {
+  try {
+    await Browser.close();
+  } catch {
+    // Ignore when already closed or unsupported
+  }
+}
+
+export function subscribeAuthDeepLink(onCode: (code: string) => void): () => void {
+  if (!isNativeCapacitor()) return () => {};
+  let removeFn: (() => Promise<void>) | null = null;
+  const extractAndDispatch = (rawUrl?: string | null) => {
+    if (!rawUrl || !rawUrl.startsWith('com.makset.caresync://')) return;
+    try {
+      const parsed = new URL(rawUrl);
+      const code = parsed.searchParams.get('code');
+      if (code) {
+        onCode(code.trim().toUpperCase());
+      }
+    } catch {
+      // Ignore malformed deep link
+    }
+  };
+
+  CapApp.getLaunchUrl()
+    .then((res) => extractAndDispatch(res?.url))
+    .catch(() => {});
+
+  CapApp.addListener('appUrlOpen', ({ url }) => {
+    extractAndDispatch(url);
+  })
+    .then((handle) => {
+      removeFn = () => handle.remove();
+    })
+    .catch(() => {});
+
+  return () => {
+    if (removeFn) removeFn().catch(() => {});
+  };
 }
 
 export function downloadTextFile(filename: string, content: string, mime = 'text/csv;charset=utf-8;'): void {

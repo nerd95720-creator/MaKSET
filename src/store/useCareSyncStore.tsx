@@ -1,18 +1,35 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut as firebaseSignOut } from 'firebase/auth';
+import {
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithCredential,
+  signInWithPopup,
+  signOut as firebaseSignOut,
+} from 'firebase/auth';
 import {
   buildSummaryLines,
   createInitialState,
   ENCOUNTER_FLAGS,
   HOME_FACILITY,
 } from '../data/seedData';
-import { apiRequest, BootstrapResponse, getMemoryIdToken, setMemoryIdToken } from '../lib/api';
+import {
+  API_BASE,
+  apiRequest,
+  BootstrapResponse,
+  exchangeMobileAuthCode,
+  getMemoryIdToken,
+  setMemoryIdToken,
+} from '../lib/api';
 import {
   clearPersistedJson,
+  closeExternalAuthBrowser,
   initCapacitorShell,
+  isNativeCapacitor,
   loadPersistedJson,
+  openExternalAuthUrl,
   playAlertBeep,
   savePersistedJson,
+  subscribeAuthDeepLink,
   subscribeBackButton,
   subscribeNetworkChanges,
   triggerHaptic,
@@ -101,6 +118,7 @@ interface CareSyncContextValue {
   authError: string | null;
   signedInEmail: string | null;
   signInWithGoogle: () => Promise<boolean>;
+  completeMobileAuthCode: (code: string) => Promise<boolean>;
   continueSession: () => Promise<boolean>;
   logout: () => void;
   syncNow: () => void;
@@ -523,8 +541,62 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     });
   }, [drawerOpen, modal, back]);
 
+  const completeMobileAuthCode = useCallback(
+    async (code: string): Promise<boolean> => {
+      const clean = code.trim().toUpperCase();
+      if (!clean) {
+        toast('Enter the sign-in code from your browser');
+        return false;
+      }
+      setAuthError(null);
+      setAuthLoading(true);
+      try {
+        const { idToken, accessToken } = await exchangeMobileAuthCode(clean);
+        const cred = GoogleAuthProvider.credential(idToken || null, accessToken || null);
+        const result = await signInWithCredential(auth, cred);
+        const token = await result.user.getIdToken();
+        setMemoryIdToken(token);
+        setSignedInEmail(result.user.email || null);
+        const data = await apiRequest<BootstrapResponse>('/api/bootstrap');
+        applyBootstrap(data, true);
+        triggerHaptic(false).catch(() => {});
+        return true;
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : 'Unable to complete mobile Google sign-in.';
+        setAuthError(msg);
+        toast(msg);
+        return false;
+      } finally {
+        setAuthLoading(false);
+      }
+    },
+    [applyBootstrap, toast],
+  );
+
+  useEffect(() => {
+    return subscribeAuthDeepLink((code) => {
+      closeExternalAuthBrowser().catch(() => {});
+      void completeMobileAuthCode(code);
+    });
+  }, [completeMobileAuthCode]);
+
   const signInWithGoogle = useCallback(async (): Promise<boolean> => {
     setAuthError(null);
+    if (isNativeCapacitor()) {
+      setAuthLoading(true);
+      try {
+        await openExternalAuthUrl(`${API_BASE}/?mobile_auth=1`);
+        toast('Complete Google sign-in in your browser to return to MaKSET.');
+        return true;
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : 'Unable to open browser for Google sign-in.';
+        setAuthError(msg);
+        toast(msg);
+        return false;
+      } finally {
+        setAuthLoading(false);
+      }
+    }
     setAuthLoading(true);
     try {
       const result = await signInWithPopup(auth, googleAuthProvider);
@@ -1576,6 +1648,7 @@ export const CareSyncProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     authError,
     signedInEmail,
     signInWithGoogle,
+    completeMobileAuthCode,
     continueSession,
     logout,
     syncNow,

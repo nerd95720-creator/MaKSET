@@ -1,11 +1,12 @@
-import { asc, desc, eq } from 'drizzle-orm';
+import { randomBytes } from 'crypto';
+import { and, asc, desc, eq, gt } from 'drizzle-orm';
 import {
   buildSummaryLines,
   createInitialState,
   FACILITIES,
   HOME_FACILITY,
 } from '../data/seedData.ts';
-import {
+import type {
   Encounter,
   FacilityInfo,
   LabTask,
@@ -21,6 +22,7 @@ import {
   encounters,
   facilities,
   labTasks,
+  mobileAuthCodes,
   notifications,
   patients,
   pharmacyTasks,
@@ -764,5 +766,62 @@ export async function recordAuditEntry(uid: string, actorName: string, facility:
   } catch (error) {
     console.error('Database query failed in recordAuditEntry:', error);
     throw new Error('Failed to save audit log.', { cause: error });
+  }
+}
+
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function generateHandoffCode(length = 10): string {
+  const bytes = randomBytes(length);
+  let out = '';
+  for (let i = 0; i < length; i += 1) {
+    out += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
+  }
+  return out;
+}
+
+export async function createMobileAuthCode(input: {
+  idToken: string;
+  accessToken: string;
+  email: string;
+}): Promise<string> {
+  try {
+    const code = generateHandoffCode(10);
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+    await db.insert(mobileAuthCodes).values({
+      code,
+      idToken: input.idToken || '',
+      accessToken: input.accessToken || '',
+      email: (input.email || '').trim().toLowerCase(),
+      used: false,
+      expiresAt,
+    });
+    return code;
+  } catch (error) {
+    console.error('Database query failed in createMobileAuthCode:', error);
+    throw new Error('Failed to create mobile sign-in code.', { cause: error });
+  }
+}
+
+export async function consumeMobileAuthCode(code: string) {
+  try {
+    const clean = code.trim().toUpperCase();
+    if (!clean) return null;
+    const now = new Date();
+    const updated = await db
+      .update(mobileAuthCodes)
+      .set({ used: true })
+      .where(
+        and(
+          eq(mobileAuthCodes.code, clean),
+          eq(mobileAuthCodes.used, false),
+          gt(mobileAuthCodes.expiresAt, now),
+        ),
+      )
+      .returning();
+    return updated[0] || null;
+  } catch (error) {
+    console.error('Database query failed in consumeMobileAuthCode:', error);
+    throw new Error('Failed to verify mobile sign-in code.', { cause: error });
   }
 }

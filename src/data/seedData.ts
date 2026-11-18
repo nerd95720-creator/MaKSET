@@ -1,4 +1,4 @@
-import {
+import type {
   CareSyncState,
   DashboardLevelKey,
   Encounter,
@@ -6,7 +6,7 @@ import {
   Patient,
   Referral,
   StaffMember,
-} from '../types/caresync';
+} from '../types/caresync.ts';
 
 export const HOME_FACILITY = 'Azare Primary Health Centre';
 

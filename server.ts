@@ -4,7 +4,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   completeTaskRecord,
+  consumeMobileAuthCode,
   createFacilityRecord,
+  createMobileAuthCode,
   createTaskRecord,
   getBootstrapData,
   markNotificationsReadForEncounter,
@@ -16,7 +18,8 @@ import {
   upsertReferralRecord,
   upsertStaffRecord,
 } from './src/db/queries.ts';
-import { AuthRequest, requireAuth } from './src/middleware/auth.ts';
+import type { AuthRequest } from './src/middleware/auth.ts';
+import { requireAuth } from './src/middleware/auth.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,6 +47,42 @@ async function startServer() {
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true });
+  });
+
+  app.post('/api/auth/mobile-code', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { idToken = '', accessToken = '' } = req.body || {};
+      if (!idToken && !accessToken) {
+        return res.status(400).json({ error: 'Missing Google OAuth credential' });
+      }
+      const code = await createMobileAuthCode({
+        idToken: String(idToken || ''),
+        accessToken: String(accessToken || ''),
+        email: req.user?.email || '',
+      });
+      res.json({ code });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to create sign-in code.';
+      res.status(500).json({ error: message });
+    }
+  });
+
+  app.post('/api/auth/mobile-exchange', async (req, res) => {
+    try {
+      const { code = '' } = req.body || {};
+      const record = await consumeMobileAuthCode(String(code || ''));
+      if (!record) {
+        return res.status(400).json({ error: 'Sign-in code is invalid or expired. Please try again.' });
+      }
+      res.json({
+        idToken: record.idToken,
+        accessToken: record.accessToken,
+        email: record.email,
+      });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to verify sign-in code.';
+      res.status(500).json({ error: message });
+    }
   });
 
   app.get('/api/bootstrap', requireAuth, async (req: AuthRequest, res) => {

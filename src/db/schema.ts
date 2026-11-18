@@ -149,6 +149,17 @@ export const auditLogs = pgTable('audit_logs', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+export const mobileAuthCodes = pgTable('mobile_auth_codes', {
+  id: serial('id').primaryKey(),
+  code: text('code').notNull().unique(),
+  idToken: text('id_token').notNull().default(''),
+  accessToken: text('access_token').notNull().default(''),
+  email: text('email').notNull().default(''),
+  used: boolean('used').notNull().default(false),
+  expiresAt: timestamp('expires_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 export const usersRelations = relations(users, ({ many }) => ({
   patients: many(patients),
 }));

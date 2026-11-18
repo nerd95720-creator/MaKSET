@@ -22,6 +22,7 @@ import {
   SurveillanceScreen,
 } from './screens/ReferralsAndReportsScreens';
 import { LoginScreen, SplashScreen } from './screens/SplashAndLogin';
+import { MobileAuthBridge } from './screens/MobileAuthBridge';
 import { NotificationsScreen, TaskDetailScreen, TasksScreen } from './screens/TasksAndNotifScreens';
 import { CareSyncProvider, useCareSync } from './store/useCareSyncStore';
 
@@ -90,6 +91,14 @@ const ScreenRouter: React.FC = () => {
 };
 
 export default function App() {
+  const isMobileAuthBridge =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('mobile_auth') === '1';
+
+  if (isMobileAuthBridge) {
+    return <MobileAuthBridge />;
+  }
+
   return (
     <CareSyncProvider>
       <LayoutShell>
